@@ -18,7 +18,6 @@ const PORT = process.env.PORT || 10000;
 // Game state
 let players = [];
 let secrets = {};
-let turn = null;
 let gameStarted = false;
 
 io.on("connection", (socket) => {
@@ -32,6 +31,8 @@ io.on("connection", (socket) => {
     }
 
     players.push(socket.id);
+    console.log("Players:", players);
+
     socket.emit("joinedGame", { playerId: socket.id });
     io.emit("gameLog", `Player joined (${players.length}/2)`);
 
@@ -46,7 +47,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Handle secret set
+  // Player sets secret
   socket.on("setSecret", (secret) => {
     if (!players.includes(socket.id)) {
       console.warn("⚠️ setSecret called before joinGame. Ignoring.");
@@ -56,79 +57,75 @@ io.on("connection", (socket) => {
     secrets[socket.id] = secret;
     socket.emit("gameLog", "✅ Secret number set! Waiting for opponent...");
 
-    // Both secrets set — start the game
+    // If both secrets are ready
     if (Object.keys(secrets).length === 2 && !gameStarted) {
       gameStarted = true;
-      // Randomly choose who starts
-      turn = players[Math.floor(Math.random() * 2)];
-
-      io.emit("gameLog", "🎯 Both secrets set! Game starting!");
-      io.emit("gameStart", { startId: turn });
-
-      io.to(turn).emit("yourTurn");
-      io.to(getOpponent(turn)).emit("opponentTurn");
+      const randomStart = players[Math.floor(Math.random() * 2)];
+      io.emit("gameStart", { startId: randomStart });
+      io.emit("gameLog", "🎯 Both secrets set! Game start!");
     }
   });
 
   // Handle guesses
   socket.on("makeGuess", (guess) => {
-    if (!gameStarted) {
-      socket.emit("gameLog", "⚠️ Game hasn’t started yet!");
-      return;
-    }
+    if (!gameStarted || !players.includes(socket.id)) return;
 
-    if (socket.id !== turn) {
-      socket.emit("gameLog", "⏳ Wait for your turn!");
-      return;
-    }
-
-    const opponentId = getOpponent(socket.id);
+    const opponentId = players.find((id) => id !== socket.id);
     const opponentSecret = secrets[opponentId];
+    if (!opponentSecret) return;
 
-    if (!opponentSecret) {
-      socket.emit("gameLog", "⚠️ Opponent’s secret not ready yet!");
-      return;
+    const secretArr = opponentSecret.split("");
+    const guessArr = guess.split("");
+
+    // Step 1: count correct positions
+    let correctPosition = 0;
+    let secretRemaining = [];
+    let guessRemaining = [];
+
+    for (let i = 0; i < 4; i++) {
+      if (guessArr[i] === secretArr[i]) {
+        correctPosition++;
+      } else {
+        secretRemaining.push(secretArr[i]);
+        guessRemaining.push(guessArr[i]);
+      }
     }
 
-    const { correctPosition, correctNumber } = evaluateGuess(
-      guess,
-      opponentSecret
-    );
-
-    socket.emit("guessResult", { guess, correctPosition, correctNumber });
-    io.to(opponentId).emit("opponentGuess", {
-      guess,
-      correctPosition,
-      correctNumber,
+    // Step 2: count correct digits (right digit, wrong place)
+    let correctNumber = 0;
+    guessRemaining.forEach((digit) => {
+      const index = secretRemaining.indexOf(digit);
+      if (index !== -1) {
+        correctNumber++;
+        secretRemaining.splice(index, 1);
+      }
     });
 
-    io.emit(
-      "gameLog",
-      `${socket.id.slice(0, 4)} guessed ${guess} → Correct Position: ${correctPosition}, Correct Digit(s): ${correctNumber}`
-    );
+    // Send feedback to both players
+    io.to(socket.id).emit("guessResult", { guess, correctPosition, correctNumber });
+    io.to(opponentId).emit("opponentGuess", { guess, correctPosition, correctNumber });
 
-    // Win check
+    // Check win condition
     if (correctPosition === 4) {
       io.emit("gameWin", socket.id);
-      io.emit("gameLog", `🏆 Player ${socket.id.slice(0, 4)} wins!`);
-      resetGame();
-      return;
+      io.emit("gameLog", `🎉 Player ${socket.id} guessed correctly and won!`);
+      gameStarted = false;
+      secrets = {};
+      players = [];
+    } else {
+      // Switch turns
+      io.to(opponentId).emit("yourTurn");
+      io.to(socket.id).emit("opponentTurn");
     }
-
-    // Switch turns
-    turn = opponentId;
-    io.to(turn).emit("yourTurn");
-    io.to(getOpponent(turn)).emit("opponentTurn");
   });
 
-  // Disconnects
+  // Handle disconnection
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
 
     players = players.filter((id) => id !== socket.id);
     delete secrets[socket.id];
     gameStarted = false;
-    turn = null;
 
     if (players.length === 1) {
       io.emit("gameLog", "⚠️ Opponent disconnected. Waiting for new player...");
@@ -138,34 +135,6 @@ io.on("connection", (socket) => {
     }
   });
 });
-
-function getOpponent(id) {
-  return players.find((p) => p !== id);
-}
-
-function evaluateGuess(guess, secret) {
-  let correctPosition = 0;
-  let correctNumber = 0;
-
-  const guessArr = guess.split("");
-  const secretArr = secret.split("");
-
-  guessArr.forEach((d, i) => {
-    if (d === secretArr[i]) {
-      correctPosition++;
-    } else if (secretArr.includes(d)) {
-      correctNumber++;
-    }
-  });
-
-  return { correctPosition, correctNumber };
-}
-
-function resetGame() {
-  secrets = {};
-  gameStarted = false;
-  turn = null;
-}
 
 server.listen(PORT, () => {
   console.log(`✅ Server listening on port ${PORT}`);
