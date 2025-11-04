@@ -85,36 +85,49 @@ io.on('connection', (socket) => {
   });
 
   // Set the player's secret number (string of 4 digits, no validation here or minimal)
-  socket.on('setSecret', ({ roomId, secret } = {}, cb) => {
-    const room = rooms[roomId];
-    if (!room || !room.players[socket.id]) {
-      if (cb) cb({ ok: false, error: 'Room or player not found' });
-      return;
-    }
-    // basic validation: 4 digits
-    if (typeof secret !== 'string' || !/^\d{4}$/.test(secret)) {
-      if (cb) cb({ ok: false, error: 'Secret must be a 4-digit string' });
-      return;
-    }
-    room.players[socket.id].secret = secret;
-    room.players[socket.id].ready = true;
-    addLog(room, `${room.players[socket.id].name} is ready.`);
-    io.to(room.id).emit('roomUpdate', sanitizeRoom(room));
+  socket.on("setSecret", (data, cb) => {
+  // Support both plain string and object payloads
+  const secret = typeof data === "string" ? data : data?.secret;
+  const room = Object.values(rooms).find((r) => r.players[socket.id]);
 
-    // if both players ready, start game
-    const pIds = Object.keys(room.players);
-    if (pIds.length === 2 && room.players[pIds[0]].ready && room.players[pIds[1]].ready && !room.started) {
-      // randomize who starts
-      const startIndex = Math.floor(Math.random() * 2);
-      room.turn = room.order[startIndex];
-      room.started = true;
-      addLog(room, `Game started. ${room.players[room.turn].name} starts.`);
-      io.to(room.id).emit('gameStart', { room: sanitizeRoom(room), startId: room.turn });
-      io.to(room.id).emit('roomUpdate', sanitizeRoom(room));
-    }
+  if (!room) {
+    if (cb) cb({ ok: false, error: "Room or player not found" });
+    return;
+  }
 
-    if (cb) cb({ ok: true });
-  });
+  // Basic validation
+  if (typeof secret !== "string" || !/^\d{4}$/.test(secret)) {
+    if (cb) cb({ ok: false, error: "Secret must be a 4-digit string" });
+    return;
+  }
+
+  room.players[socket.id].secret = secret;
+  room.players[socket.id].ready = true;
+  addLog(room, `${room.players[socket.id].name} is ready.`);
+  io.to(room.id).emit("roomUpdate", sanitizeRoom(room));
+
+  // If both players are ready, start game
+  const pIds = Object.keys(room.players);
+  if (
+    pIds.length === 2 &&
+    room.players[pIds[0]].ready &&
+    room.players[pIds[1]].ready &&
+    !room.started
+  ) {
+    const startIndex = Math.floor(Math.random() * 2);
+    room.turn = room.order[startIndex];
+    room.started = true;
+
+    addLog(room, `Game started. ${room.players[room.turn].name} starts.`);
+    io.to(room.id).emit("gameStart", {
+      room: sanitizeRoom(room),
+      startId: room.turn,
+    });
+    io.to(room.id).emit("roomUpdate", sanitizeRoom(room));
+  }
+
+  if (cb) cb({ ok: true });
+});
 
   // Make a guess
   socket.on('guess', ({ roomId, guess } = {}, cb) => {
