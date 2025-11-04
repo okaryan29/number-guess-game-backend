@@ -1,94 +1,137 @@
-import express from "express";
-import http from "http";
-import { Server } from "socket.io";
-import cors from "cors";
-import { checkGuess } from "./utils.js";
+const express = require("express");
+const http = require("http");
+const socketIo = require("socket.io");
+const cors = require("cors");
 
 const app = express();
 app.use(cors());
 const server = http.createServer(app);
-
-const io = new Server(server, {
-  cors: { origin: "*" },
+const io = socketIo(server, {
+  cors: { origin: "*" }
 });
 
-let waitingPlayer = null;
-const games = {}; // { roomId: { players: [], numbers: {}, turn: 0 } }
+const PORT = 5000;
+
+// Store rooms: { roomId: { players: [socket], numbers: {}, ready: 0, turn: 0 } }
+const rooms = {};
+
+// Helper: Bulls & Cows with repeated digits
+function calculateResult(secret, guess) {
+  let bulls = 0; // correct position
+  let cows = 0;  // correct digit, wrong position
+
+  const secretCount = {};
+  for (let digit of secret) {
+    secretCount[digit] = (secretCount[digit] || 0) + 1;
+  }
+
+  // Count bulls
+  for (let i = 0; i < 4; i++) {
+    if (guess[i] === secret[i]) {
+      bulls++;
+      secretCount[guess[i]]--;
+    }
+  }
+
+  // Count cows
+  for (let i = 0; i < 4; i++) {
+    if (guess[i] !== secret[i] && secretCount[guess[i]] > 0) {
+      cows++;
+      secretCount[guess[i]]--;
+    }
+  }
+
+  return {
+    correctPosition: bulls,
+    correctDigit: bulls + cows  // total correct digits
+  };
+}
 
 io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
+  console.log("Player connected:", socket.id);
 
-  socket.on("joinGame", (data) => {
-    if (waitingPlayer) {
-      const roomId = `room_${socket.id}_${waitingPlayer.id}`;
-      games[roomId] = {
-        players: [waitingPlayer.id, socket.id],
-        numbers: {},
-        turn: 0, // 0 -> player1's turn, 1 -> player2's
-      };
+  socket.on("joinGame", () => {
+    let roomId = null;
 
-      socket.join(roomId);
-      waitingPlayer.join(roomId);
+    // Find or create room
+    for (let id in rooms) {
+      if (rooms[id].players.length === 1) {
+        roomId = id;
+        break;
+      }
+    }
 
-      io.to(roomId).emit("gameStart", {
-        roomId,
-        players: games[roomId].players,
-      });
+    if (!roomId) {
+      roomId = "room-" + Date.now();
+      rooms[roomId] = { players: [], numbers: {}, ready: 0, turn: 0 };
+    }
 
-      waitingPlayer = null;
-    } else {
-      waitingPlayer = socket;
-      socket.emit("waiting", "Waiting for another player...");
+    socket.join(roomId);
+    rooms[roomId].players.push(socket);
+
+    socket.emit("waiting", "Waiting for opponent...");
+    socket.roomId = roomId;
+
+    if (rooms[roomId].players.length === 2) {
+      const [p1, p2] = rooms[roomId].players;
+      io.to(roomId).emit("gameStart", { roomId, players: [p1.id, p2.id] });
     }
   });
 
   socket.on("setNumber", ({ roomId, number }) => {
-    const game = games[roomId];
-    if (!game) return;
+    if (!rooms[roomId] || !number || number.length !== 4) return;
 
-    game.numbers[socket.id] = number;
+    rooms[roomId].numbers[socket.id] = number;
+    rooms[roomId].ready++;
 
-    if (Object.keys(game.numbers).length === 2) {
-      io.to(roomId).emit("bothReady", "Both players have set their numbers!");
+    if (rooms[roomId].ready === 2) {
+      io.to(roomId).emit("bothReady", "Both ready! First player starts.");
+      const first = rooms[roomId].players[0];
+      io.to(roomId).emit("nextTurn", first.id);
     }
   });
 
   socket.on("makeGuess", ({ roomId, guess }) => {
-    const game = games[roomId];
-    if (!game) return;
+    const room = rooms[roomId];
+    if (!room || room.turn >= room.players.length) return;
 
-    const opponentId = game.players.find((id) => id !== socket.id);
-    const opponentNumber = game.numbers[opponentId];
-    if (!opponentNumber) return;
+    const currentPlayer = room.players[room.turn];
+    if (currentPlayer.id !== socket.id) return;
 
-    const result = checkGuess(opponentNumber, guess);
+    const opponent = room.players.find(p => p.id !== socket.id);
+    const secret = room.numbers[opponent.id];
+    const result = calculateResult(secret, guess);
+
+    // Send result to both
     io.to(roomId).emit("guessResult", {
       player: socket.id,
       guess,
-      result,
+      result
     });
 
+    // Check win
     if (result.correctPosition === 4) {
       io.to(roomId).emit("gameOver", { winner: socket.id });
-      delete games[roomId];
-    } else {
-      game.turn = game.turn === 0 ? 1 : 0;
-      io.to(roomId).emit("nextTurn", game.players[game.turn]);
+      delete rooms[roomId];
+      return;
     }
+
+    // Next turn
+    room.turn = (room.turn + 1) % 2;
+    const nextPlayer = room.players[room.turn];
+    io.to(roomId).emit("nextTurn", nextPlayer.id);
   });
 
   socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
-    if (waitingPlayer?.id === socket.id) waitingPlayer = null;
-
-    for (const roomId in games) {
-      if (games[roomId].players.includes(socket.id)) {
-        io.to(roomId).emit("opponentLeft");
-        delete games[roomId];
-      }
+    const roomId = socket.roomId;
+    if (rooms[roomId]) {
+      io.to(roomId).emit("opponentLeft");
+      delete rooms[roomId];
     }
+    console.log("Player left:", socket.id);
   });
 });
 
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+});
