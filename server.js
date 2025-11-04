@@ -41,21 +41,23 @@ io.on("connection", (socket) => {
   });
 
   socket.on("setNumber", ({ roomId, number }) => {
-    const game = games[roomId];
-    if (!game) return;
+  const game = games[roomId];
+  if (!game) return;
 
-    game.numbers[socket.id] = number;
-    socket.emit("numberSet", "Your number is set!");
+  game.numbers[socket.id] = number;
+  socket.emit("numberSet", "Your number is set!");
 
-    // Check if both players set numbers
-    if (Object.keys(game.numbers).length === 2) {
-      // Randomly pick starting player
-      const [p1, p2] = game.players;
-      game.turn = Math.random() < 0.5 ? p1 : p2;
-      io.to(roomId).emit("bothReady", "Both numbers are set. Start guessing!");
-      io.to(roomId).emit("nextTurn", game.turn);
-    }
-  });
+  // Check if both players set numbers
+  if (Object.keys(game.numbers).length === 2) {
+    // Randomly pick starting player
+    const [p1, p2] = game.players;
+    game.turn = Math.random() < 0.5 ? p1 : p2;
+
+    // Emit bothReady AFTER numbers are set
+    io.to(roomId).emit("bothReady", "Both numbers are set. Start guessing!");
+    io.to(roomId).emit("nextTurn", game.turn); // first turn
+  }
+});
 
   socket.on("makeGuess", ({ roomId, guess }) => {
     const game = games[roomId];
