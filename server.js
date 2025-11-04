@@ -50,31 +50,41 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("setSecret", (secret, cb) => {
-    if (typeof secret !== "string" || !/^\d{4}$/.test(secret)) {
-      if (cb) cb({ ok: false, error: "Secret must be 4 digits" });
-      return;
-    }
+ socket.on("setSecret", (secret, cb) => {
+  // Ensure player exists first
+  if (!players[socket.id]) {
+    console.log("⚠️ setSecret called before joinGame. Ignoring.");
+    if (cb) cb({ ok: false, error: "You must join first." });
+    return;
+  }
 
-    players[socket.id].secret = secret;
-    players[socket.id].ready = true;
-    console.log(`${players[socket.id].name} set secret: ${secret}`);
+  // Validate secret
+  if (typeof secret !== "string" || !/^\d{4}$/.test(secret)) {
+    if (cb) cb({ ok: false, error: "Secret must be 4 digits" });
+    return;
+  }
 
-    const readyIds = Object.keys(players).filter((id) => players[id].ready);
+  // Save secret
+  players[socket.id].secret = secret;
+  players[socket.id].ready = true;
+  console.log(`${players[socket.id].name} set secret: ${secret}`);
 
-    if (readyIds.length === 2 && !started) {
-      started = true;
-      const startIndex = Math.floor(Math.random() * 2);
-      turn = playerOrder[startIndex];
-      console.log("✅ Both ready! Game starting. Turn:", turn);
-      io.emit("gameStart", { startId: turn });
-    } else {
-      console.log("Waiting for opponent...");
-    }
+  // Check readiness
+  const readyIds = Object.keys(players).filter((id) => players[id].ready);
 
-    broadcastUpdate();
-    if (cb) cb({ ok: true });
-  });
+  if (readyIds.length === 2 && !started) {
+    started = true;
+    const startIndex = Math.floor(Math.random() * 2);
+    turn = playerOrder[startIndex];
+    console.log("✅ Both ready! Game starting. Turn:", turn);
+    io.emit("gameStart", { startId: turn });
+  } else {
+    console.log("Waiting for opponent...");
+  }
+
+  broadcastUpdate();
+  if (cb) cb({ ok: true });
+});
 
   socket.on("makeGuess", (guess) => {
     if (!started || turn !== socket.id) return;
