@@ -1,154 +1,134 @@
-import React, { useState, useEffect } from "react";
-import { io } from "socket.io-client";
-import "./styles.css";
+import express from "express";
+import http from "http";
+import { Server } from "socket.io";
 
-const socket = io("http://localhost:5000"); // update if deployed
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*" },
+});
 
-function App() {
-  const [roomId, setRoomId] = useState(null);
-  const [step, setStep] = useState("waiting"); // waiting, setNumber, guess
-  const [myNumber, setMyNumber] = useState("");
-  const [guess, setGuess] = useState("");
-  const [log, setLog] = useState(["Connecting to server..."]);
-  const [myTurn, setMyTurn] = useState(false);
+const PORT = 5000;
 
-  // Listen for server events
-  useEffect(() => {
-    socket.on("waiting", msg => setLog(prev => [...prev, { text: msg }]));
+// Game state
+const games = {}; // roomId -> { players: [id1, id2], numbers: {id: "1234"}, turn }
 
-    socket.on("gameStart", ({ roomId: rId, players }) => {
-      setRoomId(rId);
-      setStep("setNumber");
-      setLog(prev => [...prev, { text: "🎉 Game started! Set your number." }]);
+io.on("connection", (socket) => {
+  console.log(`User connected: ${socket.id}`);
+
+  socket.on("joinGame", () => {
+    // Find a room with one player waiting
+    let roomId = Object.keys(games).find(
+      (id) => games[id].players.length === 1
+    );
+
+    if (!roomId) {
+      // Create new room
+      roomId = `room-${Math.floor(Math.random() * 10000)}`;
+      games[roomId] = { players: [socket.id], numbers: {}, turn: null };
+      socket.join(roomId);
+      socket.emit("waiting", "Waiting for opponent...");
+    } else {
+      // Join existing room
+      games[roomId].players.push(socket.id);
+      socket.join(roomId);
+      io.to(roomId).emit("gameStart", {
+        roomId,
+        players: games[roomId].players,
+      });
+      io.to(roomId).emit("waiting", "Both players connected!");
+    }
+  });
+
+  socket.on("setNumber", ({ roomId, number }) => {
+    const game = games[roomId];
+    if (!game) return;
+
+    game.numbers[socket.id] = number;
+    socket.emit("numberSet", "Your number is set!");
+
+    // Check if both players set numbers
+    if (Object.keys(game.numbers).length === 2) {
+      // Randomly pick starting player
+      const [p1, p2] = game.players;
+      game.turn = Math.random() < 0.5 ? p1 : p2;
+      io.to(roomId).emit("bothReady", "Both numbers are set. Start guessing!");
+      io.to(roomId).emit("nextTurn", game.turn);
+    }
+  });
+
+  socket.on("makeGuess", ({ roomId, guess }) => {
+    const game = games[roomId];
+    if (!game) return;
+    if (socket.id !== game.turn) return; // Not this player's turn
+
+    const opponentId = game.players.find((id) => id !== socket.id);
+    const secret = game.numbers[opponentId];
+    const result = getGuessResult(secret, guess);
+
+    io.to(socket.id).emit("guessResult", {
+      player: socket.id,
+      guess,
+      result,
+    });
+    io.to(opponentId).emit("guessResult", {
+      player: socket.id,
+      guess,
+      result,
     });
 
-    socket.on("bothReady", msg => setLog(prev => [...prev, { text: msg }]));
+    // Check for win
+    if (result.correctPosition === 4) {
+      io.to(roomId).emit("gameOver", { winner: socket.id });
+    } else {
+      // Switch turn
+      game.turn = opponentId;
+      io.to(roomId).emit("nextTurn", game.turn);
+    }
+  });
 
-    socket.on("guessResult", ({ player, guess, result }) => {
-      setLog(prev => [
-        ...prev,
-        {
-          text: `${player === socket.id ? "You" : "Opponent"} guessed ${guess} -> ${result.correctPosition} correct position, ${result.correctDigit} correct digit(s)`
-        }
-      ]);
-    });
+  socket.on("disconnect", () => {
+    console.log(`User disconnected: ${socket.id}`);
+    // Remove player from any rooms
+    for (const roomId in games) {
+      const game = games[roomId];
+      if (game.players.includes(socket.id)) {
+        socket.to(roomId).emit("opponentLeft");
+        delete games[roomId];
+      }
+    }
+  });
+});
 
-    socket.on("nextTurn", playerId => {
-      const isMyTurn = playerId === socket.id;
-      setMyTurn(isMyTurn);
-      setLog(prev => [
-        ...prev,
-        {
-          text: isMyTurn ? "✨ Your turn!" : "⏳ Opponent's turn...",
-          highlight: isMyTurn,
-        }
-      ]);
-    });
+// Utility function
+function getGuessResult(secret, guess) {
+  let correctPosition = 0;
+  let correctDigit = 0;
 
-    socket.on("gameOver", ({ winner }) => {
-      setStep("gameOver");
-      setLog(prev => [
-        ...prev,
-        {
-          text: winner === socket.id ? "🏆 You won!" : "💔 You lost!",
-          highlight: true,
-        }
-      ]);
-    });
+  const secretArr = secret.split("");
+  const guessArr = guess.split("");
 
-    socket.on("opponentLeft", () => {
-      setStep("waiting");
-      setLog(prev => [...prev, { text: "⚠️ Opponent left the game." }]);
-      setRoomId(null);
-      setMyTurn(false);
-    });
+  const unmatchedSecret = [];
+  const unmatchedGuess = [];
 
-    return () => {
-      socket.off("waiting");
-      socket.off("gameStart");
-      socket.off("bothReady");
-      socket.off("guessResult");
-      socket.off("nextTurn");
-      socket.off("gameOver");
-      socket.off("opponentLeft");
-    };
-  }, []);
+  for (let i = 0; i < 4; i++) {
+    if (guessArr[i] === secretArr[i]) {
+      correctPosition++;
+    } else {
+      unmatchedSecret.push(secretArr[i]);
+      unmatchedGuess.push(guessArr[i]);
+    }
+  }
 
-  const joinGame = () => {
-    socket.emit("joinGame");
-  };
+  unmatchedGuess.forEach((digit) => {
+    const index = unmatchedSecret.indexOf(digit);
+    if (index !== -1) {
+      correctDigit++;
+      unmatchedSecret.splice(index, 1);
+    }
+  });
 
-  const submitNumber = () => {
-    if (!myNumber) return;
-    socket.emit("setNumber", { roomId, number: myNumber.padStart(4, "0") });
-    setStep("guess");
-    setLog(prev => [...prev, { text: `✅ Your number is set: ${myNumber.padStart(4, "0")}` }]);
-  };
-
-  const submitGuess = () => {
-    if (!guess || !myTurn) return;
-    socket.emit("makeGuess", { roomId, guess: guess.padStart(4, "0") });
-    setGuess("");
-  };
-
-  return (
-    <div className="game-container">
-      <h1>🎀 Number Guess Game 🎀</h1>
-
-      <div className="log">
-        {log.map((msg, index) => (
-          <div
-            key={index}
-            className="log-item"
-            style={{
-              color: msg.highlight ? "#ff69b4" : "#fff",
-              textShadow: msg.highlight ? "0 0 8px #ff69b4, 0 0 12px #ff69b4" : "none",
-              fontWeight: msg.highlight ? "bold" : "normal",
-            }}
-          >
-            {msg.text}
-          </div>
-        ))}
-      </div>
-
-      {step === "waiting" && (
-        <button onClick={joinGame}>💖 Join Game 💖</button>
-      )}
-
-      {step === "setNumber" && (
-        <>
-          <input
-            type="text"
-            maxLength={4}
-            placeholder="Enter your number"
-            value={myNumber}
-            onChange={(e) => setMyNumber(e.target.value.replace(/\D/g, ""))}
-          />
-          <button onClick={submitNumber}>💖 Set Number 💖</button>
-        </>
-      )}
-
-      {step === "guess" && (
-        <>
-          <input
-            type="text"
-            maxLength={4}
-            placeholder="Guess opponent's number"
-            value={guess}
-            onChange={(e) => setGuess(e.target.value.replace(/\D/g, ""))}
-            disabled={!myTurn}
-          />
-          <button onClick={submitGuess} disabled={!myTurn}>
-            💡 Submit Guess 💡
-          </button>
-        </>
-      )}
-
-      {step === "gameOver" && (
-        <button onClick={joinGame}>🔄 Play Again 🔄</button>
-      )}
-    </div>
-  );
+  return { correctPosition, correctDigit };
 }
 
-export default App;
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
