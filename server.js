@@ -1,127 +1,89 @@
 import express from "express";
-import { createServer } from "http";
+import http from "http";
 import { Server } from "socket.io";
 import cors from "cors";
 
 const app = express();
 app.use(cors());
-const server = createServer(app);
+
+const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: "*" },
+  cors: {
+    origin: "*",
+  },
 });
 
 const PORT = process.env.PORT || 10000;
 
-// ===== Simple global game state =====
-const players = {};
-let playerOrder = [];
-let started = false;
-let turn = null;
+// Game state
+let players = [];
+let secrets = {};
+let gameStarted = false;
 
-// Helper: send state to everyone
-function broadcastUpdate() {
-  io.emit("gameUpdate", {
-    players: Object.fromEntries(
-      Object.entries(players).map(([id, p]) => [id, { name: p.name, ready: p.ready }])
-    ),
-    started,
-    turn,
-  });
-}
-
-// ===== SOCKET HANDLERS =====
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
-  socket.on("joinGame", (name, cb) => {
-    players[socket.id] = { name, ready: false, secret: "" };
-    playerOrder.push(socket.id);
-    console.log(`${name} joined. Total players: ${playerOrder.length}`);
-    broadcastUpdate();
-    if (cb) cb({ ok: true });
-
-    // Auto-start when 2 joined
-    if (playerOrder.length > 2) {
-      console.log("Resetting game - too many players");
-      Object.keys(players).forEach((id) => delete players[id]);
-      playerOrder = [socket.id];
-      started = false;
-      turn = null;
-    }
-  });
-
- socket.on("setSecret", (secret, cb) => {
-  // Ensure player exists first
-  if (!players[socket.id]) {
-    console.log("⚠️ setSecret called before joinGame. Ignoring.");
-    if (cb) cb({ ok: false, error: "You must join first." });
-    return;
-  }
-
-  // Validate secret
-  if (typeof secret !== "string" || !/^\d{4}$/.test(secret)) {
-    if (cb) cb({ ok: false, error: "Secret must be 4 digits" });
-    return;
-  }
-
-  // Save secret
-  players[socket.id].secret = secret;
-  players[socket.id].ready = true;
-  console.log(`${players[socket.id].name} set secret: ${secret}`);
-
-  // Check readiness
-  const readyIds = Object.keys(players).filter((id) => players[id].ready);
-
-  if (readyIds.length === 2 && !started) {
-    started = true;
-    const startIndex = Math.floor(Math.random() * 2);
-    turn = playerOrder[startIndex];
-    console.log("✅ Both ready! Game starting. Turn:", turn);
-    io.emit("gameStart", { startId: turn });
-  } else {
-    console.log("Waiting for opponent...");
-  }
-
-  broadcastUpdate();
-  if (cb) cb({ ok: true });
-});
-
-  socket.on("makeGuess", (guess) => {
-    if (!started || turn !== socket.id) return;
-
-    const opponentId = playerOrder.find((id) => id !== socket.id);
-    const secret = players[opponentId].secret;
-
-    let correctPosition = 0;
-    let correctNumber = 0;
-    for (let i = 0; i < 4; i++) {
-      if (guess[i] === secret[i]) correctPosition++;
-      else if (secret.includes(guess[i])) correctNumber++;
-    }
-
-    io.to(socket.id).emit("guessResult", { guess, correctPosition, correctNumber });
-    io.to(opponentId).emit("opponentGuess", { guess, correctPosition, correctNumber });
-
-    if (correctPosition === 4) {
-      io.emit("gameWin", socket.id);
-      started = false;
+  // Player joins
+  socket.on("joinGame", () => {
+    if (players.length >= 2) {
+      socket.emit("errorMsg", "Game full. Try again later.");
       return;
     }
 
-    turn = opponentId;
-    io.to(turn).emit("yourTurn");
-    broadcastUpdate();
+    players.push(socket.id);
+    console.log("Players:", players);
+
+    socket.emit("joinedGame", { playerId: socket.id });
+    io.emit("gameLog", `Player joined (${players.length}/2)`);
+
+    // If only one player — make them wait
+    if (players.length === 1) {
+      socket.emit("waitingForOpponent", true);
+      socket.emit("gameLog", "Waiting for another player to join...");
+    }
+
+    // If two players — start the match
+    if (players.length === 2) {
+      io.emit("bothPlayersReady", true);
+      io.emit("gameLog", "Both players connected! Set your secret numbers.");
+    }
   });
 
+  // Handle secret set
+  socket.on("setSecret", (secret) => {
+    if (!players.includes(socket.id)) {
+      console.warn("⚠️ setSecret called before joinGame. Ignoring.");
+      return;
+    }
+
+    secrets[socket.id] = secret;
+    socket.emit("gameLog", "✅ Secret number set! Waiting for opponent...");
+
+    // If both secrets set, start game
+    if (Object.keys(secrets).length === 2 && !gameStarted) {
+      gameStarted = true;
+      io.emit("bothSecretsSet", true);
+      io.emit("gameLog", "🎯 Both secrets set! Game start!");
+    }
+  });
+
+  // Handle disconnection
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
-    delete players[socket.id];
-    playerOrder = playerOrder.filter((id) => id !== socket.id);
-    started = false;
-    turn = null;
-    io.emit("opponentLeft");
-    broadcastUpdate();
+
+    players = players.filter((id) => id !== socket.id);
+    delete secrets[socket.id];
+    gameStarted = false;
+
+    if (players.length === 1) {
+      io.emit("gameLog", "⚠️ Opponent disconnected. Waiting for new player...");
+      io.to(players[0]).emit("waitingForOpponent", true);
+    } else {
+      io.emit("gameLog", "All players left. Game reset.");
+    }
   });
 });
 
-server.listen(PORT, () => console.log(`✅ Server listening on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`✅ Server listening on port ${PORT}`);
+});
